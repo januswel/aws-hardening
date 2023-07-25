@@ -1,0 +1,3 @@
+[submodule "aws-config-rules"]
+	path = aws-config-rules
+	url = git@github.com:awslabs/aws-config-rules.git

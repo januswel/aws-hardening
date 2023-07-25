@@ -5,12 +5,17 @@ import {
   aws_cloudtrail as CloudTrail,
   aws_cloudwatch as CloudWatch,
   aws_cloudwatch_actions as CloudWatchActions,
+  aws_config as Config,
   aws_iam as Iam,
   aws_logs as Logs,
   aws_s3 as S3,
   aws_sns as Sns,
+  cloudformation_include as CloudFormationInclude,
+  aws_events as Events,
+  aws_events_targets as EventsTargets,
 } from "aws-cdk-lib";
 import * as dotenv from "dotenv";
+import path = require("path");
 
 dotenv.config();
 
@@ -102,6 +107,116 @@ export class HardeningStack extends cdk.Stack {
       guardrailPolicies: [
         Iam.ManagedPolicy.fromAwsManagedPolicyName("ReadOnlyAccess"),
       ],
+    });
+
+    // https://github.com/aws/aws-cdk/issues/3492#issuecomment-617706845
+    // https://aws.amazon.com/jp/blogs/news/service-notice-upcoming-changes-required-for-aws-config/
+    const configRole = new Iam.Role(this, "ConfigRole", {
+      assumedBy: new Iam.ServicePrincipal("config.amazonaws.com"),
+      managedPolicies: [
+        Iam.ManagedPolicy.fromAwsManagedPolicyName(
+          "service-role/AWS_ConfigRole"
+        ),
+      ],
+    });
+    new Config.CfnConfigurationRecorder(this, "ConfigurationRecorder", {
+      name: "Default",
+      roleArn: configRole.roleArn,
+      recordingGroup: {
+        allSupported: true,
+        includeGlobalResourceTypes: true,
+      },
+    });
+    bucket.addToResourcePolicy(
+      new Iam.PolicyStatement({
+        effect: Iam.Effect.ALLOW,
+        principals: [configRole],
+        actions: ["s3:GetBucketAcl"],
+        resources: [bucket.bucketArn],
+      })
+    );
+    bucket.addToResourcePolicy(
+      new Iam.PolicyStatement({
+        effect: Iam.Effect.ALLOW,
+        principals: [configRole],
+        actions: ["s3:PutObject"],
+        resources: [
+          bucket.arnForObjects(
+            `AWSLogs/${cdk.Stack.of(this).account}/Config/*`
+          ),
+        ],
+        conditions: {
+          StringEquals: {
+            "s3:x-amz-acl": "bucket-owner-full-control",
+          },
+        },
+      })
+    );
+    new Config.CfnDeliveryChannel(this, "ConfigDeliveryChannel", {
+      s3BucketName: bucket.bucketName,
+    });
+
+    // https://aws.amazon.com/jp/blogs/news/aws-config-conformance-packs/
+    const conformancePackRole = new Iam.Role(this, "Role", {
+      assumedBy: new Iam.ServicePrincipal("config-conforms.amazonaws.com"),
+    });
+    bucket.addToResourcePolicy(
+      new Iam.PolicyStatement({
+        effect: Iam.Effect.ALLOW,
+        principals: [conformancePackRole],
+        actions: ["s3:GetBucketAcl"],
+        resources: [bucket.bucketArn],
+      })
+    );
+    bucket.addToResourcePolicy(
+      new Iam.PolicyStatement({
+        effect: Iam.Effect.ALLOW,
+        principals: [conformancePackRole],
+        actions: ["s3:PutObject"],
+        resources: [
+          bucket.arnForObjects(
+            `AWSLogs/${cdk.Stack.of(this).account}/Config/*`
+          ),
+        ],
+        conditions: {
+          StringEquals: {
+            "s3:x-amz-acl": "bucket-owner-full-control",
+          },
+        },
+      })
+    );
+    bucket.addToResourcePolicy(
+      new Iam.PolicyStatement({
+        effect: Iam.Effect.ALLOW,
+        principals: [conformancePackRole],
+        actions: ["s3:GetObject"],
+        resources: [
+          bucket.arnForObjects(
+            `AWSLogs/${cdk.Stack.of(this).account}/Config/*`
+          ),
+        ],
+      })
+    );
+    new Events.Rule(this, "ConfigRuleComplianceNotifications", {
+      ruleName: "ConfigRuleComplianceNotifications",
+      description: "Config Rule Compliance Notifications",
+      enabled: true,
+      eventPattern: {
+        source: ["aws.config"],
+        detailType: ["Config Rules Compliance Change"],
+        detail: {
+          configRuleName: ["*"],
+          complianceType: ["NON_COMPLIANT"],
+        },
+      },
+      targets: [new EventsTargets.SnsTopic(snsTopic)],
+    });
+    new CloudFormationInclude.CfnInclude(this, "ConformancePack", {
+      templateFile: path.resolve(
+        //"./aws-config-rules/aws-config-conformance-packs/Security-Best-Practices-for-CloudTrail.yaml"
+        //"./aws-config-rules/aws-config-conformance-packs/Operational-Best-Practices-for-Amazon-S3.yaml"
+        "./aws-config-rules/aws-config-conformance-packs/Operational-Best-Practices-for-API-Gateway.yaml"
+      ),
     });
   }
 }
